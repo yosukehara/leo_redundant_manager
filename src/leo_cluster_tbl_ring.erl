@@ -2,7 +2,7 @@
 %%
 %% Leo Redundant Manager
 %%
-%% Copyright (c) 2012-2016 Rakuten, Inc.
+%% Copyright (c) 2012-2015 Rakuten, Inc.
 %%
 %% This file is provided to you under the Apache License,
 %% Version 2.0 (the "License"); you may not use this file
@@ -23,18 +23,18 @@
 %% @end
 %%======================================================================
 -module(leo_cluster_tbl_ring).
+-author('Yosuke Hara').
 
 -include("leo_redundant_manager.hrl").
--include_lib("stdlib/include/qlc.hrl").
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("stdlib/include/qlc.hrl").
 
 -export([create_table_current/1, create_table_current/2,
          create_table_prev/1, create_table_prev/2,
          lookup/3, find_all/1, find_by_cluster_id/2,
-         insert/2, delete/3,
+         insert/2, bulk_insert/2, delete/3, bulk_delete/3,
          first/2, last/2, prev/3, next/3,
-         delete_all/2,
-         size/2,
+         delete_all/2, size/1, tab2list/1,
          overwrite/3
         ]).
 -export([create_table_for_test/3]).
@@ -56,7 +56,12 @@ create_table_current(Mode, Nodes) ->
            [{Mode, Nodes},
             {type, ordered_set},
             {record_name, ?RING},
-            {attributes, record_info(fields, ?RING)}
+            {attributes, record_info(fields, ?RING)},
+            {user_properties,
+             [{vnode_id, integer, primary},
+              {atom,     varchar, false},
+              {clock,    integer, false}
+             ]}
            ]) of
         {atomic, ok} ->
             ok;
@@ -76,18 +81,18 @@ create_table_prev(Mode) ->
              ok when Mode::mnesia_copies(),
                      Nodes::[atom()]).
 create_table_prev(Mode, Nodes) ->
-    case mnesia:create_table(
-           ?RING_TBL_PREV,
-           [{Mode, Nodes},
-            {type, ordered_set},
-            {record_name, ?RING},
-            {attributes, record_info(fields, ?RING)}
-           ]) of
-        {atomic, ok} ->
-            ok;
-        {aborted, Reason} ->
-            {error, Reason}
-    end.
+    mnesia:create_table(
+      ?RING_TBL_PREV,
+      [{Mode, Nodes},
+       {type, ordered_set},
+       {record_name, ?RING},
+       {attributes, record_info(fields, ?RING)},
+       {user_properties,
+        [{vnode_id, integer, primary},
+         {atom,     varchar, false},
+         {clock,    integer, false}
+        ]}
+      ]).
 
 
 %% @doc create table for the test
@@ -98,7 +103,11 @@ create_table_for_test(Mode, Nodes, Table) ->
       [{Mode, Nodes},
        {type, ordered_set},
        {record_name, ring},
-       {attributes, record_info(fields, ring)}
+       {attributes, record_info(fields, ring)},
+       {user_properties,
+        [{vnode_id, integer, primary},
+         {atom,     varchar, false  }
+        ]}
       ]).
 
 
@@ -111,7 +120,7 @@ create_table_for_test(Mode, Nodes, Table) ->
                                  ClusterId::cluster_id(),
                                  VNodeId::integer()).
 lookup({?DB_MNESIA, Table}, ClusterId, VNodeId) ->
-    F = fun() ->
+F = fun() ->
                 Q = qlc:q([X || X <- mnesia:table(Table),
                                 X#?RING.cluster_id == ClusterId,
                                 X#?RING.vnode_id == VNodeId]),
@@ -125,8 +134,10 @@ lookup({?DB_MNESIA, Table}, ClusterId, VNodeId) ->
     end;
 lookup({?DB_ETS, Table}, ClusterId, VNodeId) ->
     case catch ets:lookup(Table, {ClusterId, VNodeId}) of
-        [{_,Ring}|_] ->
-            Ring;
+        [{VNodeId, Node, Clock}|_] ->
+            #?RING{vnode_id = VNodeId,
+                   node     = Node,
+                   clock    = Clock};
         [] ->
             not_found;
         {'EXIT', Cause} ->
@@ -196,16 +207,59 @@ find_by_cluster_id({?DB_ETS, Table}, ClusterId) ->
 %%
 -spec(insert(TableInfo, Ring) ->
              ok | {error, any()} when TableInfo::table_info(),
-                                      Ring::#ring_2{}).
-insert({?DB_MNESIA, Table}, Ring) when is_record(Ring, ring_2) ->
-    Fun = fun() ->
-                  mnesia:write(Table, Ring, write)
-          end,
+                                      Ring::#ring{}|#ring_0_16_8{}|tuple()).
+insert({?DB_MNESIA, Table}, Ring) when is_record(Ring, ring);
+                                       is_record(Ring, ring_0_16_8) ->
+    Fun = fun() -> mnesia:write(Table, Ring, write) end,
     leo_mnesia:write(Fun);
-insert({?DB_ETS, Table}, #?RING{cluster_id = ClusterId,
-                                vnode_id = VNodeId} = Ring) ->
-    true = ets:insert(Table, {{ClusterId, VNodeId}, Ring}),
+insert({?DB_MNESIA, Table}, {VNodeId, Node, Clock}) ->
+    Fun = fun() -> mnesia:write(Table, #?RING{vnode_id = VNodeId,
+                                              node     = Node,
+                                              clock    = Clock}, write) end,
+    leo_mnesia:write(Fun);
+insert({?DB_ETS, Table}, {VNodeId, Node, Clock}) ->
+    true = ets:insert(Table, {VNodeId, Node, Clock}),
     ok.
+
+
+%% @doc Insert bulk of records into the table
+%%
+-spec(bulk_insert(TableInfo, List) ->
+             ok | {error, any()} when TableInfo::table_info(),
+                                      List::[{integer(), atom(), integer()}]).
+bulk_insert({?DB_MNESIA, Table}, List) ->
+    case mnesia:sync_transaction(
+           fun() ->
+                   bulk_insert_1(Table, List)
+           end) of
+        {atomic, ok} ->
+            ok;
+        {aborted, Reason} ->
+            {error, Reason}
+    end;
+
+bulk_insert({?DB_ETS,_}, []) ->
+    ok;
+bulk_insert({?DB_ETS,_} = TableInfo, [Ring|Rest]) ->
+    case insert(TableInfo, Ring) of
+        ok ->
+            bulk_insert(TableInfo, Rest);
+        Error ->
+            Error
+    end.
+
+%% @private
+bulk_insert_1(_,[]) ->
+    ok;
+bulk_insert_1(Table, [{VNodeId, Node, Clock}|Rest]) ->
+    case mnesia:write(Table, #?RING{vnode_id = VNodeId,
+                                    node     = Node,
+                                    clock    = Clock}, write) of
+        ok ->
+            bulk_insert_1(Table, Rest);
+        _ ->
+            mnesia:abort("Not inserted")
+    end.
 
 
 %% @doc Remove a record from the table
@@ -231,12 +285,58 @@ delete({?DB_ETS, Table}, ClusterId, VNodeId) ->
     ok.
 
 
+%% @doc Remove bulk of records from the table
+%%
+-spec(bulk_delete(TableInfo, ClusterId, List) ->
+             ok | {error, any()} when TableInfo::table_info(),
+                                      ClusterId::cluster_id(),
+                                      List::[integer()]).
+bulk_delete({?DB_MNESIA,_} = TableInfo, ClusterId, List) ->
+    case mnesia:sync_transaction(
+           fun() ->
+                   bulk_delete_1(TableInfo, ClusterId, List)
+           end) of
+        {atomic, ok} ->
+            ok;
+        {aborted, Reason} ->
+            {error, Reason}
+    end;
+
+bulk_delete({?DB_ETS,_},_ClusterId, []) ->
+    ok;
+bulk_delete({?DB_ETS,_} = TableInfo, ClusterId, [VNodeId|Rest]) ->
+    case delete(TableInfo, ClusterId, VNodeId) of
+        ok ->
+            bulk_delete(TableInfo, ClusterId, Rest);
+        Error ->
+            Error
+    end.
+
+%% @private
+bulk_delete_1(_,_,[]) ->
+    ok;
+bulk_delete_1({_, Table} = TableInfo, ClusterId, [VNodeId|Rest]) ->
+    case lookup(TableInfo, ClusterId, VNodeId) of
+        {error, Cause} ->
+            {error, Cause};
+        not_found ->
+            ok;
+        Ring ->
+            case mnesia:delete_object(Table, Ring, write) of
+                ok ->
+                    bulk_delete_1(TableInfo, ClusterId, Rest);
+                _ ->
+                    mnesia:abort("Not removed")
+            end
+    end.
+
+
 %% @doc Retrieve a first record from the table
 %%
 -spec(first(TableInfo, ClusterId) ->
              integer() | '$end_of_table' when TableInfo::table_info(),
                                               ClusterId::cluster_id()).
-first({?DB_MNESIA,_Table} = TblInfo, ClusterId) ->
+first({?DB_MNESIA,_} = TblInfo, ClusterId) ->
     case find_by_cluster_id(TblInfo, ClusterId) of
         {ok, [#?RING{vnode_id = VNodeId}|_]} ->
             VNodeId;
@@ -255,13 +355,12 @@ first({?DB_ETS, Table} = TblInfo, ClusterId) ->
             Other
     end.
 
-
 %% @doc Retrieve a last record from the table
 %%
 -spec(last(TableInfo, ClusterId) ->
              integer() | '$end_of_table' when TableInfo::table_info(),
                                               ClusterId::cluster_id()).
-last({?DB_MNESIA,_Table} = TblInfo, ClusterId) ->
+last({?DB_MNESIA,_} = TblInfo, ClusterId) ->
     case find_by_cluster_id(TblInfo, ClusterId) of
         {ok, RetL} ->
             [#?RING{vnode_id = VNodeId}|_] = lists:reverse(RetL),
@@ -307,6 +406,7 @@ prev({?DB_MNESIA, Table}, ClusterId, VNodeId) ->
 prev({?DB_ETS, Table}, ClusterId, VNodeId) ->
     case ets:prev(Table, {ClusterId, VNodeId}) of
         {ClusterId, VNodeId_1} ->
+
             VNodeId_1;
         {_, VNodeId_1} when is_integer(VNodeId_1) ->
             '$end_of_table';
@@ -317,17 +417,16 @@ prev({?DB_ETS, Table}, ClusterId, VNodeId) ->
 
 %% @doc Retrieve a next record from the table
 %%
--spec(next(TableInfo, ClusterId, VNodeId) ->
-             integer() | '$end_of_table' when TableInfo::table_info(),
-                                              ClusterId::cluster_id(),
-                                              VNodeId::integer()).
+-spec(next({?DB_MNESIA|?DB_ETS, atom()}, ClusterId, VNodeId) ->
+             integer() | '$end_of_table' when ClusterId::cluster_id(),
+                                              VNodeId::non_neg_integer()).
 next({?DB_MNESIA, Table}, ClusterId, VNodeId) ->
     F = fun() ->
                 Q1 = qlc:q([X || X <- mnesia:table(Table),
                                  X#?RING.cluster_id == ClusterId,
                                  X#?RING.vnode_id > VNodeId]),
                 Q2 = qlc:sort(Q1, [{order, ascending}]),
-                qlc:e(Q2)
+                                qlc:e(Q2)
         end,
     case leo_mnesia:read(F) of
         {ok, [#?RING{vnode_id = VNodeId_1}|_]} ->
@@ -340,8 +439,9 @@ next({?DB_MNESIA, Table}, ClusterId, VNodeId) ->
 next({?DB_ETS, Table}, ClusterId, VNodeId) ->
     case ets:next(Table, {ClusterId, VNodeId}) of
         {ClusterId, VNodeId_1} ->
+
             VNodeId_1;
-        {_, VNodeId_1} when is_integer(VNodeId_1) ->
+                {_, VNodeId_1} when is_integer(VNodeId_1) ->
             '$end_of_table';
         Other ->
             Other
@@ -374,18 +474,33 @@ delete_all_1(TblInfo, [#?RING{cluster_id = ClusterId,
 
 %% @doc Retrieve total of records
 %%
--spec(size(TableInfo, ClusterId) ->
-             integer() when TableInfo::table_info(),
-                            ClusterId::cluster_id()).
-size(TblInfo, ClusterId) ->
-    case find_by_cluster_id(TblInfo, ClusterId) of
-        {ok, RetL} ->
-            erlang:length(RetL);
-        not_found ->
-            0;
-        Other ->
-            Other
-    end.
+-spec(size(TableInfo) ->
+             integer() when TableInfo::table_info()).
+size({?DB_MNESIA, Table}) ->
+    mnesia:ets(fun ets:info/2, [Table, size]);
+size({?DB_ETS, Table}) ->
+    ets:info(Table, size).
+
+
+%% @doc Retrieve list from the table
+%%
+-spec(tab2list(TableInfo) ->
+             [tuple()]|[#?RING{}]|{error, any()} when TableInfo::table_info()).
+tab2list({?DB_MNESIA, Table}) ->
+    case mnesia:ets(fun ets:tab2list/1, [Table]) of
+        [] ->
+            [];
+        List when is_list(List) ->
+            lists:map(fun(#?RING{vnode_id = VNodeId,
+                                 node = Node,
+                                 clock = Clock}) ->
+                              {VNodeId, Node, Clock}
+                      end, List);
+        Error ->
+            Error
+    end;
+tab2list({?DB_ETS, Table}) ->
+    ets:tab2list(Table).
 
 
 %% @doc Overwrite current records by source records
@@ -418,13 +533,14 @@ overwrite(SrcTableInfo, DestTableInfo, ClusterId) ->
             end
     end.
 
+
 %% @private
 -spec(overwrite_1(TableInfo, Items) ->
              ok | {error, any()} when TableInfo::{?DB_MNESIA, atom()} |
                                                  {?DB_ETS, atom()},
                                       Items::[tuple()]|[#?RING{}]).
 overwrite_1({?DB_MNESIA,_} = TableInfo,Items) ->
-    case mnesia:transaction(
+    case mnesia:sync_transaction(
            fun() ->
                    overwrite_2(TableInfo, Items)
            end) of

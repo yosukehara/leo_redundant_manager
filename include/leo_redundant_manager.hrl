@@ -63,6 +63,7 @@
 -define(ERROR_COULD_NOT_GET_MEMBERS, "Could not get members").
 -define(ERROR_INVALID_CONF, "Invalid configuration").
 -define(ERROR_SOME_RECORDS, "There're some records").
+-define(ERROR_INVALID_MDCR_CONFIG, "Invalid configurations of mdc-replication").
 
 -define(ERR_TYPE_INCONSISTENT_HASH, inconsistent_hash).
 -define(ERR_TYPE_NODE_DOWN, nodedown).
@@ -76,7 +77,13 @@
 -define(PROP_L1, 'level_1').
 -define(PROP_L2, 'level_2').
 -define(PROP_RING_BIT, 'bit_of_ring').
-
+-type(consistency_item() :: ?PROP_N |
+                            ?PROP_W |
+                            ?PROP_R |
+                            ?PROP_D |
+                            ?PROP_L1 |
+                            ?PROP_L2 |
+                            ?PROP_RING_BIT).
 -define(DEF_MIN_REPLICAS, 1).
 -define(DEF_MAX_REPLICAS, 8).
 
@@ -347,67 +354,98 @@
 %% Configure of Redundancies and Consistency Level
 -record(system_conf, {
           version = 0 :: non_neg_integer(),
-          n = 0 :: non_neg_integer(),
-          r = 1 :: non_neg_integer(),
-          w = 1 :: non_neg_integer(),
-          d = 1 :: non_neg_integer(),
-          bit_of_ring = 128 :: non_neg_integer(),
-          level_1 = 0 :: non_neg_integer(),
+          n = 1 :: pos_integer(),
+          r = 1 :: pos_integer(),
+          w = 1 :: pos_integer(),
+          d = 1 :: pos_integer(),
+          bit_of_ring = 128 :: pos_integer(),
+          level_1 = 1 :: pos_integer(),
           level_2 = 0 :: non_neg_integer()
          }).
 -record(system_conf_1, {
           version = 0 :: non_neg_integer(),
           cluster_id :: atom()|string(),
           dc_id :: atom()|string(),
-          n = 1 :: non_neg_integer(),
-          r = 1 :: non_neg_integer(),
-          w = 1 :: non_neg_integer(),
-          d = 1 :: non_neg_integer(),
-          bit_of_ring = 128 :: non_neg_integer(),
-          num_of_dc_replicas = 0 :: non_neg_integer(),
+          n = 1 :: pos_integer(),
+          r = 1 :: pos_integer(),
+          w = 1 :: pos_integer(),
+          d = 1 :: pos_integer(),
+          bit_of_ring = 128 :: pos_integer(),
+          num_of_dc_replicas = 1 :: pos_integer(),
           num_of_rack_replicas = 0 :: non_neg_integer()
          }).
 -record(system_conf_2, {
           version = 1 :: non_neg_integer(), %% version
           cluster_id :: cluster_id(),       %% cluster-id
           dc_id :: atom(),                  %% dc-id
-          n = 0 :: non_neg_integer(),       %% # of replicas
-          r = 0 :: non_neg_integer(),       %% # of replicas needed for a successful READ operation
-          w = 0 :: non_neg_integer(),       %% # of replicas needed for a successful WRITE operation
-          d = 0 :: non_neg_integer(),       %% # of replicas needed for a successful DELETE operation
-          bit_of_ring = 128 :: non_neg_integer(),        %% # of bits for the hash-ring (fixed 128bit)
-          num_of_dc_replicas  = 0 :: non_neg_integer(),  %% # of destination of nodes a cluster for MDC-replication
+          n = 1 :: pos_integer(),       %% # of replicas
+          r = 1 :: pos_integer(),       %% # of replicas needed for a successful READ operation
+          w = 1 :: pos_integer(),       %% # of replicas needed for a successful WRITE operation
+          d = 1 :: pos_integer(),       %% # of replicas needed for a successful DELETE operation
+          bit_of_ring = 128 :: pos_integer(),        %% # of bits for the hash-ring (fixed 128bit)
+          num_of_dc_replicas  = 1 :: pos_integer(),  %% # of destination of nodes a cluster for MDC-replication
           num_of_rack_replicas = 0 :: non_neg_integer(), %% # of Rack-awareness replicas
-          max_mdc_targets = ?DEF_MAX_MDC_TARGETS :: non_neg_integer() %% max multi-dc replication targets for MDC-replication
+          max_mdc_targets = ?DEF_MAX_MDC_TARGETS :: pos_integer() %% max multi-dc replication targets for MDC-replication
          }).
--define(SYSTEM_CONF, 'system_conf_2').
+-record(system_conf_3, {
+          version = 1 :: non_neg_integer(), %% version
+          cluster_id :: atom(),             %% cluster-id
+          dc_id :: atom(),                  %% dc-id
+          n = 1 :: pos_integer(),           %% # of replicas
+          r = 1 :: pos_integer(),           %% # of replicas needed for a successful READ operation
+          w = 1 :: pos_integer(),           %% # of replicas needed for a successful WRITE operation
+          d = 1 :: pos_integer(),           %% # of replicas needed for a successful DELETE operation
+          bit_of_ring = 128 :: pos_integer(),        %% # of bits for the hash-ring (fixed 128bit)
+          num_of_dc_replicas  = 1 :: pos_integer(),  %% # of destination of nodes a cluster for MDC-replication
+          mdcr_r = 1 :: pos_integer(), %% mdc-replication / # of replicas needed for a successful READ operation
+          mdcr_w = 1 :: pos_integer(), %% mdc-replication / # of replicas needed for a successful WRITE operation
+          mdcr_d = 1 :: pos_integer(), %% mdc-replication / # of replicas needed for a successful DELETE operation
+          num_of_rack_replicas = 0 :: non_neg_integer(), %% # of Rack-awareness replicas
+          max_mdc_targets = ?DEF_MAX_MDC_TARGETS :: pos_integer() %% max multi-dc replication targets for MDC-replication
+         }).
+-define(SYSTEM_CONF, 'system_conf_3').
 
 
 %% Configuration of a remote cluster
 -record(cluster_info, {
           cluster_id :: atom()|string(), %% cluster-id
           dc_id :: atom()|string(),      %% dc-id
-          n = 1 :: non_neg_integer(),    %% # of replicas
-          r = 1 :: non_neg_integer(),    %% # of replicas needed for a successful READ operation
-          w = 1 :: non_neg_integer(),    %% # of replicas needed for a successful WRITE operation
-          d = 1 :: non_neg_integer(),    %% # of replicas needed for a successful DELETE operation
-          bit_of_ring = 128 :: non_neg_integer(),        %% # of bits for the hash-ring (fixed 128bit)
-          num_of_dc_replicas = 0 :: non_neg_integer(),   %% # of replicas a DC for MDC-replication
+          n = 1 :: pos_integer(),    %% # of replicas
+          r = 1 :: pos_integer(),    %% # of replicas needed for a successful READ operation
+          w = 1 :: pos_integer(),    %% # of replicas needed for a successful WRITE operation
+          d = 1 :: pos_integer(),    %% # of replicas needed for a successful DELETE operation
+          bit_of_ring = 128 :: pos_integer(),        %% # of bits for the hash-ring (fixed 128bit)
+          num_of_dc_replicas = 1 :: pos_integer(),   %% # of replicas a DC for MDC-replication
           num_of_rack_replicas = 0 :: non_neg_integer()  %% # of Rack-awareness replicas
          }).
 -record(cluster_info_1, {
           cluster_id :: cluster_id(), %% cluster-id
           dc_id :: atom(),            %% dc-id
-          n = 0 :: non_neg_integer(), %% # of replicas
-          r = 0 :: non_neg_integer(), %% # of replicas needed for a successful READ operation
-          w = 0 :: non_neg_integer(), %% # of replicas needed for a successful WRITE operation
-          d = 0 :: non_neg_integer(), %% # of replicas needed for a successful DELETE operation
-          bit_of_ring = 128 :: non_neg_integer(),        %% # of bits for the hash-ring (fixed 128bit)
-          num_of_dc_replicas = 0 :: non_neg_integer(),   %% # of replicas a DC for MDC-replication
+          n = 1 :: pos_integer(), %% # of replicas
+          r = 1 :: pos_integer(), %% # of replicas needed for a successful READ operation
+          w = 1 :: pos_integer(), %% # of replicas needed for a successful WRITE operation
+          d = 1 :: pos_integer(), %% # of replicas needed for a successful DELETE operation
+          bit_of_ring = 128 :: pos_integer(),        %% # of bits for the hash-ring (fixed 128bit)
+          num_of_dc_replicas = 1 :: pos_integer(),   %% # of replicas a DC for MDC-replication
           num_of_rack_replicas = 0 :: non_neg_integer(), %% # of Rack-awareness replicas
-          max_mdc_targets = ?DEF_MAX_MDC_TARGETS :: non_neg_integer() %% max multi-dc replication targets for MDC-replication
+          max_mdc_targets = ?DEF_MAX_MDC_TARGETS :: pos_integer() %% max multi-dc replication targets for MDC-replication
          }).
--define(CLUSTER_INFO, 'cluster_info_1').
+-record(cluster_info_2, {
+          cluster_id :: atom(),       %% cluster-id
+          dc_id :: atom(),            %% dc-id
+          n = 1 :: pos_integer(), %% # of replicas
+          r = 1 :: pos_integer(), %% # of replicas needed for a successful READ operation
+          w = 1 :: pos_integer(), %% # of replicas needed for a successful WRITE operation
+          d = 1 :: pos_integer(), %% # of replicas needed for a successful DELETE operation
+          bit_of_ring = 128 :: pos_integer(),        %% # of bits for the hash-ring (fixed 128bit)
+          num_of_dc_replicas = 1 :: pos_integer(),   %% # of replicas a DC for MDC-replication
+          mdcr_r = 1 :: pos_integer(), %% mdc-replication / # of replicas needed for a successful READ operation
+          mdcr_w = 1 :: pos_integer(), %% mdc-replication / # of replicas needed for a successful WRITE operation
+          mdcr_d = 1 :: pos_integer(), %% mdc-replication / # of replicas needed for a successful DELETE operation
+          num_of_rack_replicas = 0 :: non_neg_integer(), %% # of Rack-awareness replicas
+          max_mdc_targets = ?DEF_MAX_MDC_TARGETS :: pos_integer() %% max multi-dc replication targets for MDC-replication
+         }).
+-define(CLUSTER_INFO, 'cluster_info_2').
 
 
 %% For Multi-DC Replication

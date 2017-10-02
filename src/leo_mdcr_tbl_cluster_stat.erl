@@ -169,14 +169,28 @@ find_by_cluster_id(ClusterId) ->
 %%
 -spec(update(ClusterStat) ->
              ok | {error, any()} when ClusterStat::#?CLUSTER_STAT{}).
-update(ClusterStat) ->
+update(#?CLUSTER_STAT{cluster_id = ClusterId,
+                      state = State,
+                      updated_at = UpdatedAt} = ClusterStat) ->
     Tbl = ?TBL_CLUSTER_STAT,
     case catch mnesia:table_info(Tbl, all) of
         {'EXIT', _Cause} ->
             {error, ?ERROR_MNESIA_NOT_START};
         _ ->
-            F = fun()-> mnesia:write(Tbl, ClusterStat, write) end,
-            leo_mnesia:write(F)
+            case leo_mdcr_tbl_cluster_stat:get(ClusterId) of
+                {ok, #?CLUSTER_STAT{state = State_1}} when State == State_1 ->
+                    void;
+                _ ->
+                    UpdatedAt_1 = case (UpdatedAt < 1) of
+                                      true ->
+                                          leo_date:now();
+                                      false ->
+                                          UpdatedAt
+                                  end,
+                    ClusterStat_1 = ClusterStat#?CLUSTER_STAT{updated_at = UpdatedAt_1},
+                    F = fun()-> mnesia:write(Tbl, ClusterStat_1, write) end,
+                    leo_mnesia:write(F)
+            end
     end.
 
 

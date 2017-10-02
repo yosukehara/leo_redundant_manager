@@ -45,7 +45,9 @@
         ]).
 %% Redundancy-related
 -export([get_redundancies_by_key/2, get_redundancies_by_key/3,
+         get_redundancies_by_key/4,
          get_redundancies_by_addr_id/2, get_redundancies_by_addr_id/3,
+         get_redundancies_by_addr_id/4,
          collect_redundancies_by_key/4,
          part_of_collect_redundancies_by_key/5,
          range_of_vnodes/2, rebalance/1,
@@ -264,6 +266,14 @@ record_to_tuplelist(Value) ->
     lists:zip(
       record_info(fields, ?SYSTEM_CONF), tl(tuple_to_list(Value))).
 
+
+%% -spec(attach(Node) ->
+%%              ok | {error, any()} when Node::atom()).
+%% attach(Node) ->
+%%     attach(Node, [], leo_date:clock()).
+%% -spec(attach(Node, AwarenessL2) ->
+%%              ok | {error, any()} when Node::atom(),
+%%                                       AwarenessL2::string()).
 
 %% @doc attach a node.
 -spec(attach(ClusterId, Member) ->
@@ -570,6 +580,20 @@ get_redundancies_by_key(ClusterId, Method, Key) ->
     get_redundancies_by_addr_id_1(
       ClusterId, ring_table(Method), AddrId, Options).
 
+-spec(get_redundancies_by_key(ClusterId, Method, Key, ConsistencyLevel) ->
+             {ok, #redundancies{}} |
+             {error, any()} when ClusterId::cluster_id(),
+                                 Method::method(),
+                                 Key::binary(),
+                                 ConsistencyLevel::[{ConsistencyItem, ConsistencyValue}],
+                                 ConsistencyItem::consistency_item(),
+                                 ConsistencyValue::pos_integer()).
+get_redundancies_by_key(ClusterId, Method, Key, ConsistencyLevel) ->
+    {ok, Options} = get_options(ClusterId),
+    BitOfRing = leo_misc:get_value(?PROP_RING_BIT, Options),
+    AddrId = leo_redundant_manager_chash:vnode_id(BitOfRing, Key),
+    get_redundancies_by_addr_id(ClusterId, Method, AddrId, ConsistencyLevel).
+
 
 %% @doc Retrieve redundancies from the ring-table.
 -spec(get_redundancies_by_addr_id(ClusterId, AddrId) ->
@@ -588,6 +612,35 @@ get_redundancies_by_addr_id(ClusterId, Method, AddrId) ->
     {ok, Options} = get_options(ClusterId),
     get_redundancies_by_addr_id_1(ClusterId, ring_table(Method), AddrId, Options).
 
+-spec(get_redundancies_by_addr_id(ClusterId, Method, AddrId, ConsistencyLevel) ->
+             {ok, #redundancies{}} |
+             {error, any()} when ClusterId::cluster_id(),
+                                 Method::method(),
+                                 AddrId::integer(),
+                                 ConsistencyLevel::[{ConsistencyItem, ConsistencyValue}],
+                                 ConsistencyItem::consistency_item(),
+                                 ConsistencyValue::pos_integer()).
+get_redundancies_by_addr_id(ClusterId, Method, AddrId, ConsistencyLevel) ->
+    {ok, Options} = get_options(ClusterId),
+    N_Value = leo_misc:get_value(?PROP_N, Options),
+    BitOfRing = leo_misc:get_value(?PROP_RING_BIT, Options),
+    MDCR_N_Value = leo_misc:get_value(?PROP_N, ConsistencyLevel),
+
+    case (N_Value >= MDCR_N_Value) of
+        true ->
+            MDCR_R_Value = leo_misc:get_value(?PROP_R, ConsistencyLevel),
+            MDCR_W_Value = leo_misc:get_value(?PROP_W, ConsistencyLevel),
+            MDCR_D_Value = leo_misc:get_value(?PROP_D, ConsistencyLevel),
+            Options_1 = [{?PROP_N, MDCR_N_Value},
+                         {?PROP_R, MDCR_R_Value},
+                         {?PROP_W, MDCR_W_Value},
+                         {?PROP_D, MDCR_D_Value},
+                         {?PROP_RING_BIT, BitOfRing}],
+            get_redundancies_by_addr_id_1(ClusterId, ring_table(Method), AddrId, Options_1);
+        false ->
+            {error, ?ERROR_INVALID_MDCR_CONFIG}
+    end.
+
 %% @private
 -spec(get_redundancies_by_addr_id_1(ClusterId, TableInfo, AddrId, Options) ->
              {ok, #redundancies{}} | {error, any()} when ClusterId::cluster_id(),
@@ -602,6 +655,16 @@ get_redundancies_by_addr_id_1(ClusterId, {_,Tbl}, AddrId, Options) ->
 
     case leo_redundant_manager_worker:lookup(ClusterId, Tbl, AddrId) of
         {ok, Redundancies} ->
+            RedundantNodes = Redundancies#redundancies.nodes,
+            LenNodes = erlang:length(RedundantNodes),
+            RedundantNodes_1 =
+                case (LenNodes > N) of
+                    true ->
+                        lists:sublist(RedundantNodes, N);
+                    false ->
+                        RedundantNodes
+                end,
+
             CurRingHash =
                 case leo_misc:get_env(?APP, ?PROP_RING_HASH) of
                     {ok, RingHash} ->
@@ -615,6 +678,7 @@ get_redundancies_by_addr_id_1(ClusterId, {_,Tbl}, AddrId, Options) ->
                                            r = R,
                                            w = W,
                                            d = D,
+                                           nodes = RedundantNodes_1,
                                            ring_hash = CurRingHash}};
         not_found = Cause ->
             {error, Cause}
@@ -642,9 +706,7 @@ collect_redundancies_by_key(ClusterId, Key, NumOfReplicas, MaxNumOfDuplicate) ->
         {ok, RedundantNodeL} ->
             {ok, {Options, RedundantNodeL}};
         not_found = Cause ->
-            {error, Cause};
-        Others ->
-            Others
+            {error, Cause}
     end.
 
 
@@ -754,36 +816,52 @@ takeover_status([], ClusterId, TakeOverList) ->
         Error ->
             Error
     end;
-takeover_status([#?MEMBER{state = ?STATE_ATTACHED,
-                          node  = Node,
-                          alias = Alias,
-                          grp_level_2 = GrpL2} = Member|Rest],
-                ClusterId, TakeOverList) ->
+%% <<<<<<< HEAD
+%% takeover_status([#?MEMBER{state = ?STATE_ATTACHED,
+%%                           node  = Node,
+%%                           alias = Alias,
+%%                           grp_level_2 = GrpL2} = Member|Rest],
+%%                 ClusterId, TakeOverList) ->
+%%     case get_alias(ClusterId, Node, GrpL2) of
+%% =======
+takeover_status([#member{state = ?STATE_ATTACHED,
+                         node = Node,
+                         alias = Alias,
+                         grp_level_2 = GrpL2} = Member|Rest], ClusterId, TakeOverList) ->
     case get_alias(ClusterId, Node, GrpL2) of
+%% >>>>>>> develop
         {ok, {SrcMember, Alias_1}} when Alias /= Alias_1 ->
             %% Takeover vnodes:
             %%     Remove vnodes by old-alias,
             %%     then insert vnodes by new-alias
+            Clock = leo_date:clock(),
+            Member_1 = Member#member{alias = Alias_1,
+                                     clock = Clock},
             RingTblCur = table_info(?VER_CUR),
-            Member_1 = Member#?MEMBER{alias = Alias_1},
-
-            _ = leo_redundant_manager_chash:remove(RingTblCur, Member),
-            _ = leo_redundant_manager_chash:add(RingTblCur, Member_1),
-
-            ok = leo_cluster_tbl_member:insert(
-                   ?MEMBER_TBL_CUR, ClusterId, Member_1#?MEMBER{node = Node}),
-
-            case SrcMember of
-                [] -> void;
-                #?MEMBER{node = SrcNode} ->
-                    %% @TODO
-                    ok = leo_cluster_tbl_member:insert(
-                           ?MEMBER_TBL_CUR, ClusterId,
-                           SrcMember#?MEMBER{node = SrcNode,
-                                             alias = []})
-            end,
-            takeover_status(Rest, ClusterId,
-                            [{Member, Member_1, SrcMember}|TakeOverList]);
+%% <<<<<<< HEAD
+%%             Member_1 = Member#?MEMBER{alias = Alias_1},
+%%             _ = leo_redundant_manager_chash:remove(RingTblCur, Member),
+%%             _ = leo_redundant_manager_chash:add(RingTblCur, Member_1),
+%%             ok = leo_cluster_tbl_member:insert(
+%%                    ?MEMBER_TBL_CUR, ClusterId, Member_1#?MEMBER{node = Node}),
+%%             case SrcMember of
+%%                 [] -> void;
+%%                 #?MEMBER{node = SrcNode} ->
+%%                     %% @TODO
+%%                     ok = leo_cluster_tbl_member:insert(
+%%                            ?MEMBER_TBL_CUR, ClusterId,
+%%                            SrcMember#?MEMBER{node = SrcNode,
+%%                                              alias = []})
+%%             end,
+%%             takeover_status(Rest, ClusterId,
+%%                             [{Member, Member_1, SrcMember}|TakeOverList]);
+%% =======
+            ok = leo_redundant_manager_chash:remove(RingTblCur, Member),
+            ok = leo_redundant_manager_chash:remove(RingTblCur, SrcMember),
+            ok = leo_redundant_manager_chash:add(RingTblCur, Member_1),
+            ok = leo_cluster_tbl_member:delete(?MEMBER_TBL_CUR, Node),
+            ok = leo_cluster_tbl_member:insert(?MEMBER_TBL_CUR, {Node, Member_1}),
+            takeover_status(Rest, ClusterId, [{Member, Member_1, SrcMember}|TakeOverList]);
         _ ->
             takeover_status(Rest, ClusterId, TakeOverList)
     end;
@@ -800,7 +878,7 @@ before_rebalance_1([], ClusterId) ->
         {error, Reason} ->
             error_logger:warning_msg("~p,~p,~p,~p~n",
                                      [{module, ?MODULE_STRING},
-                                      {function, "after_rebalance_1/0"},
+                                      {function, "before_rebalance_1/1"},
                                       {line, ?LINE},
                                       {body, Reason}])
     end,
@@ -843,25 +921,76 @@ after_rebalance([], ClusterId) ->
     case leo_redundant_manager_api:get_members_by_status(
            ClusterId, ?VER_CUR, ?STATE_DETACHED) of
         {ok, DetachedNodes} ->
-            TblCur = table_info(?VER_CUR),
-            TblPrev = table_info(?VER_PREV),
+%% <<<<<<< HEAD
+%%             TblCur = table_info(?VER_CUR),
+%%             TblPrev = table_info(?VER_PREV),
+%%             ok = lists:foreach(
+%%                    fun(#?MEMBER{node = Node,
+%%                                 alias = Alias} = Member) ->
+%%                            %% remove detached node from members
+%%                            leo_cluster_tbl_member:delete(
+%%                              ?MEMBER_TBL_CUR, ClusterId, Node),
+%%                            leo_cluster_tbl_member:delete(
+%%                              ?MEMBER_TBL_PREV, ClusterId, Node),
+%% =======
+            TblCur = leo_redundant_manager_api:table_info(?VER_CUR),
+            TblPrev = leo_redundant_manager_api:table_info(?VER_PREV),
             ok = lists:foreach(
-                   fun(#?MEMBER{node = Node,
-                                alias = Alias} = Member) ->
+                   fun(#member{node = Node,
+                               alias = Alias} = Member) ->
+                           %% add a took over node
+                           case leo_cluster_tbl_member:find_by_alias(?MEMBER_TBL_CUR, Alias) of
+                               {ok, MemberL} ->
+                                   case lists:keyfind(Node, 2, MemberL) of
+                                       false ->
+                                           void;
+                                       RemovedNode ->
+                                           case lists:delete(RemovedNode, MemberL) of
+                                               [#member{node = TookOverNode} = TookOverMember] ->
+                                                   ok = leo_redundant_manager_chash:add(
+                                                          table_info(?VER_PREV), TookOverMember),
+                                                   ok = leo_cluster_tbl_member:insert(
+                                                          ?MEMBER_TBL_PREV, {TookOverNode, TookOverMember});
+                                               _ ->
+                                                   void
+                                           end
+                                   end;
+                               _ ->
+                                   void
+                           end,
+
                            %% remove detached node from members
-                           leo_cluster_tbl_member:delete(
-                             ?MEMBER_TBL_CUR, ClusterId, Node),
-                           leo_cluster_tbl_member:delete(
-                             ?MEMBER_TBL_PREV, ClusterId, Node),
+                           leo_cluster_tbl_member:delete(?MEMBER_TBL_CUR, Node),
+                           leo_cluster_tbl_member:delete(?MEMBER_TBL_PREV, Node),
+
+%% >>>>>>> develop
                            %% remove detached node from ring
                            case Alias of
                                [] ->
                                    void;
-                               _  ->
-                                   leo_redundant_manager_chash:remove(
-                                     TblCur, Member),
-                                   leo_redundant_manager_chash:remove(
-                                     TblPrev, Member)
+%% <<<<<<< HEAD
+%%                                _  ->
+%%                                    leo_redundant_manager_chash:remove(
+%%                                      TblCur, Member),
+%%                                    leo_redundant_manager_chash:remove(
+%%                                      TblPrev, Member)
+%% =======
+                               _ ->
+                                   case leo_cluster_tbl_member:find_by_alias(
+                                          ?MEMBER_TBL_CUR, Alias) of
+                                       not_found ->
+                                           leo_redundant_manager_chash:remove(TblCur, Member);
+                                       _ ->
+                                           void
+                                   end,
+                                   case leo_cluster_tbl_member:find_by_alias(
+                                          ?MEMBER_TBL_PREV, Alias) of
+                                       not_found ->
+                                           leo_redundant_manager_chash:remove(TblPrev, Member);
+                                       _ ->
+                                           void
+                                   end
+%% >>>>>>> develop
                            end
                    end, DetachedNodes);
         {error,_Cause} ->
@@ -875,7 +1004,7 @@ after_rebalance([], ClusterId) ->
         {error, Reason} ->
             error_logger:warning_msg("~p,~p,~p,~p~n",
                                      [{module, ?MODULE_STRING},
-                                      {function, "after_rebalance_1/0"},
+                                      {function, "after_rebalance/1"},
                                       {line, ?LINE},
                                       {body, Reason}])
     end,
@@ -885,16 +1014,27 @@ after_rebalance([{#?MEMBER{node = Node} = Member_1, Member_2, SrcMember}|Rest], 
         %% After exec taking over data from detach-node to attach-node
         RingTblPrev = table_info(?VER_PREV),
         MembersTblPrev = ?MEMBER_TBL_PREV,
-
-        %% @TODO
-        ok = leo_redundant_manager_chash:remove(RingTblPrev, Member_1),
-        ok = leo_redundant_manager_chash:add(RingTblPrev, Member_2),
-        %% @TODO
-        %% ok = leo_cluster_tbl_member:insert(
-        %%        MembersTblPrev, {ClusterId, Node, Member_2}),
-        ok = leo_cluster_tbl_member:insert(
-               MembersTblPrev, Member_2#?MEMBER{cluster_id = ClusterId,
-                                                node = Node}),
+%% <<<<<<< HEAD
+%%         %% @TODO
+%%         ok = leo_redundant_manager_chash:remove(RingTblPrev, Member_1),
+%%         ok = leo_redundant_manager_chash:add(RingTblPrev, Member_2),
+%%         %% @TODO
+%%         %% ok = leo_cluster_tbl_member:insert(
+%%         %%        MembersTblPrev, {ClusterId, Node, Member_2}),
+%%         ok = leo_cluster_tbl_member:insert(
+%%                MembersTblPrev, Member_2#?MEMBER{cluster_id = ClusterId,
+%%                                                 node = Node}),
+%% =======
+        case (Member_1#member.node /= Member_2#member.node) of
+            true ->
+                ok = leo_redundant_manager_chash:remove(RingTblPrev, Member_1),
+                ok = leo_redundant_manager_chash:add(RingTblPrev, Member_2),
+                ok = leo_cluster_tbl_member:delete(MembersTblPrev, Node),
+                ok = leo_cluster_tbl_member:insert(MembersTblPrev, {Node, Member_2});
+            false ->
+                void
+        end,
+%% >>>>>>> develop
 
         case SrcMember of
             [] -> void;
@@ -909,7 +1049,7 @@ after_rebalance([{#?MEMBER{node = Node} = Member_1, Member_2, SrcMember}|Rest], 
         _:Cause ->
             error_logger:warning_msg("~p,~p,~p,~p~n",
                                      [{module, ?MODULE_STRING},
-                                      {function, "after_rebalance_1/2"},
+                                      {function, "after_rebalance/2"},
                                       {line, ?LINE},
                                       {body, Cause}])
     end,

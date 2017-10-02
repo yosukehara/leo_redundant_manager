@@ -42,7 +42,7 @@
          insert/1, insert/2, insert/3,
          bulk_insert/2,
          delete/2, delete/3, delete/4,
-         delete_all/2, delete_all/3,
+         delete_all/2,
          replace/2, replace/3, replace/4,
          overwrite/3,
 
@@ -182,8 +182,7 @@ find_by_cluster_id(Table, ClusterId) ->
                                  ClusterId::cluster_id()).
 find_by_cluster_id(?DB_MNESIA, Table, ClusterId) ->
     F = fun() ->
-                Q1 = qlc:q([X || X <- mnesia:table(Table),
-                                 X#?MEMBER.cluster_id == ClusterId]),
+                Q1 = qlc:q([X || X <- mnesia:table(Table)]),
                 Q2 = qlc:sort(Q1, [{order, ascending}]),
                 qlc:e(Q2)
         end,
@@ -491,20 +490,21 @@ insert(Member) ->
 insert(Table, #?MEMBER{cluster_id = _ClusterId} = Member) ->
     insert(?table_type(_ClusterId), Table, Member).
 
--spec(insert(DBType, Table, Member) ->
+-spec(insert(DBType, Table, Record) ->
              ok | {error, any} when DBType::?DB_ETS|?DB_MNESIA,
                                     Table::member_table(),
-                                    Member::#?MEMBER{}).
-insert(DBType, Table, #?MEMBER{cluster_id = ClusterId,
-                               node = Node,
-                               state = State,
-                               clock = Clock} = Member) ->
-    Ret = case lookup(DBType, Table, ClusterId, Node) of
-              {ok, #?MEMBER{state = State,
-                            clock = Clock_1}} when Clock > Clock_1 ->
+                                    Record::{atom(),
+                                             #member{}}).
+insert(DBType, Table, {_Node, Member}) ->
+    #member{node  = Node,
+            state = State,
+            clock = Clock} = Member,
+    Ret = case lookup(DBType, Table, Node) of
+              {ok, #member{state = State,
+                           clock = Clock_1}} when Clock >= Clock_1 ->
                   ok;
-              {ok, #?MEMBER{state = State,
-                            clock = Clock_1}} when Clock =< Clock_1 ->
+              {ok, #member{state = State,
+                           clock = Clock_1}} when Clock < Clock_1 ->
                   {error, ignore};
               {ok,_} ->
                   ok;
@@ -574,6 +574,8 @@ delete(?DB_MNESIA, Table, ClusterId, Node) ->
                           mnesia:delete_object(Table, Member, write)
                   end,
             leo_mnesia:delete(Fun);
+        not_found ->
+            ok;
         Error ->
             Error
     end;
@@ -602,7 +604,7 @@ delete_all(Table, ClusterId) ->
 delete_all(DBType, Table, ClusterId) ->
     case find_by_cluster_id(DBType, Table, ClusterId) of
         {ok, RetL} when  DBType == ?DB_MNESIA ->
-            case mnesia:transaction(
+            case mnesia:sync_transaction(
                    fun() ->
                            case delete_all_1(RetL, DBType, Table) of
                                ok ->
@@ -700,7 +702,7 @@ overwrite(SrcTable, DestTable, ClusterId) ->
 
 %% @private
 overwrite_1(?DB_MNESIA = DB, Table, ClusterId, Members) ->
-    case mnesia:transaction(
+    case mnesia:sync_transaction(
            fun() ->
                    overwrite_2(DB, Table, ClusterId, Members)
            end) of

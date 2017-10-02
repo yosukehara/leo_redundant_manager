@@ -2,7 +2,7 @@
 %%
 %% Leo Redundant Manager
 %%
-%% Copyright (c) 2012-2016 Rakuten, Inc.
+%% Copyright (c) 2012-2017 Rakuten, Inc.
 %%
 %% This file is provided to you under the Apache License,
 %% Version 2.0 (the "License"); you may not use this file
@@ -309,7 +309,30 @@ transform(#cluster_info{cluster_id = ClusterId,
                    num_of_dc_replicas = Level1,
                    num_of_rack_replicas = Level2,
                    max_mdc_targets = ?DEF_MAX_MDC_TARGETS
+                  };
+transform(#cluster_info_1{cluster_id = ClusterId,
+                          dc_id = DCId,
+                          n = N,
+                          r = R,
+                          w = W,
+                          d = D,
+                          bit_of_ring = BitOfRing,
+                          num_of_dc_replicas = Level1,
+                          num_of_rack_replicas = Level2,
+                          max_mdc_targets = MaxMDCTargets
+                         }) ->
+    #?CLUSTER_INFO{cluster_id = ClusterId,
+                   dc_id = DCId,
+                   n = N,
+                   r = R,
+                   w = W,
+                   d = D,
+                   bit_of_ring = BitOfRing,
+                   num_of_dc_replicas = Level1,
+                   num_of_rack_replicas = Level2,
+                   max_mdc_targets = MaxMDCTargets
                   }.
+
 
 %% @private
 transform_2() ->
